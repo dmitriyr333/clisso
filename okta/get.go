@@ -2,22 +2,16 @@ package okta
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/allcloud-io/clisso/aws"
 	"github.com/allcloud-io/clisso/config"
-	"github.com/allcloud-io/clisso/keychain"
 	"github.com/allcloud-io/clisso/saml"
 	"github.com/allcloud-io/clisso/spinner"
-	"github.com/fatih/color"
-)
-
-var (
-	keyChain = keychain.DefaultKeychain{}
+	"github.com/howeyc/gopass"
 )
 
 // Get gets temporary credentials for the given app.
-func Get(app, provider string, duration int64) (*aws.Credentials, error) {
+func Get(app, provider string) (*aws.Credentials, error) {
 	// Get provider config
 	p, err := config.GetOktaProvider(provider)
 	if err != nil {
@@ -44,7 +38,11 @@ func Get(app, provider string, duration int64) (*aws.Credentials, error) {
 		fmt.Scanln(&user)
 	}
 
-	pass, err := keyChain.Get(provider)
+	fmt.Print("Okta password: ")
+	pass, err := gopass.GetPasswd()
+	if err != nil {
+		return nil, fmt.Errorf("Couldn't read password from terminal")
+	}
 
 	// Initialize spinner
 	var s = spinner.New()
@@ -78,6 +76,17 @@ func Get(app, provider string, duration int64) (*aws.Credentials, error) {
 			PassCode:   otp,
 			StateToken: resp.StateToken,
 		})
+
+		// for Okta Verify push notification: https://developer.okta.com/docs/api/resources/authn/#verify-push-factor
+		// "Keep polling authentication transactions with WAITING result until the challenge completes or expires."
+		for vfResp.FactorResult == "WAITING" {
+			vfResp, err = c.VerifyFactor(&VerifyFactorParams{
+				FactorID:   resp.Embedded.Factors[0].ID,
+				PassCode:   otp,
+				StateToken: resp.StateToken,
+			})
+		}
+
 		s.Stop()
 		if err != nil {
 			return nil, fmt.Errorf("verifying MFA: %v", err)
@@ -102,17 +111,8 @@ func Get(app, provider string, duration int64) (*aws.Credentials, error) {
 	}
 
 	s.Start()
-	creds, err := aws.AssumeSAMLRole(arn.Provider, arn.Role, *samlAssertion, duration)
+	creds, err := aws.AssumeSAMLRole(arn.Provider, arn.Role, *samlAssertion)
 	s.Stop()
-
-	if err != nil {
-		if err.Error() == aws.ErrDurationExceeded {
-			log.Println(color.YellowString(aws.DurationExceededMessage))
-			s.Start()
-			creds, err = aws.AssumeSAMLRole(arn.Provider, arn.Role, *samlAssertion, 3600)
-			s.Stop()
-		}
-	}
 
 	return creds, err
 }
